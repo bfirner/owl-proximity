@@ -65,15 +65,13 @@ lock = Mutex.new
 #client's name
 wm = SolverWorldModel.new(@wmip, @solver_port, 'proximity solver')
 
-#Known rss values
-@rss_vals = {}
 #Current proximity values
 @proximity = {}
 
 #Connect to the world model as a client
 cwm = ClientWorldConnection.new(@wmip, @client_port)
 #Get anything with an attached sensor and remember the object names
-sensor_request = cwm.streamRequest(".*", ['sensor.*'], 1000)
+sensor_request = cwm.streamRequest(".*", ['sensor.*'], 10000)
 #Get median rss values of links
 rss_request = cwm.streamRequest(".*", ['link median'], 1000)
 while (cwm.connected and not sensor_request.isComplete() and not rss_request.isComplete() and not @quitting)
@@ -92,14 +90,17 @@ while (cwm.connected and not sensor_request.isComplete() and not rss_request.isC
   elsif (rss_request.hasNext)
     ids_to_check = {}
     result = rss_request.next()
+    #Known rss values
+    rss_vals = {}
+    #puts "Just got #{result.length} results"
     result.each_pair {|uri, attributes|
       ids = uri.split(".")
       txid = ids[1].to_i
       rxid = ids[2].to_i
-      if (not @rss_vals.has_key? txid)
-        @rss_vals[txid] = {}
+      if (not rss_vals.has_key? txid)
+        rss_vals[txid] = {}
       end
-      @rss_vals[txid][rxid] = attributes[0].data.unpack('G')[0]
+      rss_vals[txid][rxid] = attributes[0].data.unpack('G')[0]
       ids_to_check[txid] = true
     }
     #Check modified transmitters for new proximity results and send new
@@ -118,31 +119,42 @@ while (cwm.connected and not sensor_request.isComplete() and not rss_request.isC
             @proximity[id] = 0, -200
           end
           cur_closest, cur_max = @proximity[id]
-          #Go through the @rss_vals map to see if any rss values are above the threshold
-          @rss_vals[id].each{|rxer, rss|
-            #Change the proximity and set changed to true if a new proximite sensor is found
-            if (rss > @threshold and rss > cur_max)
-              if (rxer == cur_closest)
+          #First make any adjustments if the RSS of the current close receiver has changed
+          rss_vals[id].each{|rxer, rss|
+            if (rxer == cur_closest)
+              if (rss > @threshold)
                 #Update the rss level, but don't send a new solution
                 @proximity[id] = rxer, rss
                 cur_max = rss
+                puts "Updating cur closest for txer #{id} at rxer #{rxer} with rss #{rss}"
               else
-                @proximity[id] = rxer, rss
-                cur_max = rss
-                cur_closest = rxer
+                #Just moved out of proximity
+                #TODO Might still be within proximity of another receiver
+                @proximity[id] = 0, rss
                 changed = true
+                puts "Updating out of proximity for txer #{id} at rxer #{rxer} with rss #{rss}"
               end
-            elsif (rss < @threshold and rxer == cur_closest)
-              #Just moved out of proximity
-              #TODO Might still be within proximity of another receiver
-              @proximity[id] = 0, -200
+            end
+          }
+          #Go through the rss_vals map to see if any rss values are above the threshold
+          rss_vals[id].each{|rxer, rss|
+            #Change the proximity and set changed to true if a new proximite sensor is found
+            if (rss > @threshold and rss > cur_max)
+              @proximity[id] = rxer, rss
+              cur_max = rss
+              cur_closest = rxer
               changed = true
+              puts "Updating new cur closest for txer #{id} at rxer #{rxer} with rss #{rss}"
+            elsif (rss > cur_max)
+              #Just remember the best value for logging
+              cur_max = rss
+              @proximity[id][1] = rss
             end
           }
           #Make a new solution if proximity has changed
           if (changed)
             if (@proximity[id][0] == 0)
-              puts "#{name} is not in proximity of any receiver."
+              puts "#{name} is not in proximity of any receiver (best rss: #{@proximity[id][1]})."
             else
               puts "#{name} is in close proximity to #{@proximity[id][0]}."
             end
@@ -161,7 +173,7 @@ while (cwm.connected and not sensor_request.isComplete() and not rss_request.isC
       wm.pushData(new_solutions, false)
     end
   else
-    sleep 1
+    sleep 0.1
   end
 end
 
